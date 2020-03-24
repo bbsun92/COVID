@@ -1,0 +1,240 @@
+---
+title: 'COVID-19 UK '
+resource_files:
+- Counties_GB_BUC/Counties_and_Unitary_Authorities_April_2019_Boundaries_GB_BUC.shp
+- Counties_GB_BUC/Counties_GB_BUC.shx
+- Counties_GB_BUC/Counties_GB_BUC.dbf
+- Counties_GB_BUC/Counties_GB_BUC.cpg
+- Counties_GB_BUC/Counties_GB_BUC.prj
+- Counties_GB_BUC/Counties_GB_BUC.xml
+runtime: shiny
+output: flexdashboard::flex_dashboard
+---
+
+```{r setup, include=FALSE}
+library(shinydashboard)
+library(flexdashboard)
+library(tidyverse)
+library(plotly)
+library(magrittr)
+library(data.table)
+library(leaflet)
+library(sp)
+library(htmltools)
+library(rgdal)
+library(DT)
+library(RColorBrewer)
+```
+
+Overview
+=====================================
+
+Row
+-----------------------------------------------------------------------
+
+### Total cases by local authorities in England
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+geojs = readOGR("Counties_GB_BUC/Counties_GB_BUC.shp", verbose = F)
+geojs = spTransform(geojs, CRS("+proj=longlat +datum=WGS84"))
+
+covid_lad = fread("https://www.arcgis.com/sharing/rest/content/items/b684319181f94875a6879bbc833ca3a6/data", data.table = F)
+
+geojs@data %<>% left_join(covid_lad, by = c("ctyua19cd"="GSS_CD")) %>% 
+  replace_na(list(TotalCases=0))
+
+pal <- colorNumeric(
+  palette = "Blues",
+  domain = geojs@data$TotalCases)
+
+leaflet(geojs) %>% 
+  addProviderTiles(providers$CartoDB.Positron,
+                   options = providerTileOptions(maxZoom = 10)) %>% # add basemap to your map
+  addPolygons(data = geojs, 
+              label = ~htmlEscape(text = paste0(ctyua19nm, ": ",TotalCases)),
+              fillColor = ~pal(TotalCases),
+              weight = 1,
+              opacity = 1,
+              color = "white",
+              dashArray = "3",
+              fillOpacity = 0.7,
+              highlight = highlightOptions(
+                weight = 2,
+                color = "#666",
+                dashArray = "",
+                fillOpacity = 0.8,
+                bringToFront = TRUE)) %>% 
+  addCircleMarkers(data = geojs@data %>% uncount(weights = TotalCases), lng = ~long, lat = ~lat, 
+                   clusterOptions = markerClusterOptions(showCoverageOnHover = F)) %>%
+  addLegend(pal = pal, values = ~TotalCases, opacity = 0.6, position = "topright", title = "Cases") %>% 
+  addMiniMap(zoomLevelFixed = T, zoomLevelOffset = -4, 
+    tiles = providers$CartoDB.Positron,
+    toggleDisplay = TRUE) %>% 
+   addEasyButton(easyButton(
+    icon="fa-crosshairs", title="Locate Me",
+    onClick=JS("function(btn, map){ map.locate({setView: true}); }")))
+
+```
+
+Row {.tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Total Cases in the UK
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+uk_covid_cases = openxlsx::read.xlsx("https://www.arcgis.com/sharing/rest/content/items/e5fd11150d274bebaaf8fe2a7a2bda11/data", detectDates = T)
+
+uk_covid_cases %<>% dplyr::mutate(Date = as.Date(DateVal), days_since_0131 = 1:n()) %>%
+  mutate(growth_factor = CMODateCount/lag(CMODateCount, 1))
+
+fit1 = nls(data = uk_covid_cases,
+           formula = CumCases ~ exp(b0+b1*days_since_0131),
+           start = list(b0=0,b1=1))
+
+cases_uk = ggplot(data = uk_covid_cases, mapping = aes(x = Date, y = CumCases)) +
+  geom_point(aes(text = paste("Date:", Date, "<br>", "Total Cases:", CumCases))) +
+  geom_line(aes(y = predict(fit1),
+                x= Date)) +
+  labs(x = "Date", y = "Total cases") +
+  theme_minimal()
+
+myplot = plotly::ggplotly(cases_uk, tooltip = c("text"))
+renderPlotly(myplot)
+```
+
+### Cases by region
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+  DT::renderDataTable({covid_lad %>% select(Region = GSS_NM, TotalCases) %>% arrange(-TotalCases)},
+                      rownames= FALSE, server = T)
+```
+
+
+
+P(Disease|Test)
+=====================================  
+
+Probability of disease given test is positive {.sidebar}
+-----------------
+
+```{r}
+# Input: Decimal interval with step value ----
+  # Sidebar layout with input and output definitions ----
+
+      sliderInput("p_diseasep", "Prior probability of disease (Probability you currently think patient has disease):",
+                  min = 0, max = 1,
+                  value = 0.1, step = 0.05)
+      sliderInput("p_testp_diseasep", "Sensitivity of test (1-False Negative):",
+                  min = 0, max = 1,
+                  value = 0.85, step = 0.05)
+      sliderInput("p_testn_diseasen", "Specificity of test (1-False Positive):",
+                  min = 0, max = 1,
+                  value = 0.95, step = 0.05)
+
+```
+
+Column
+-----------------
+
+### Probaility of **disease +ve** if: **1 test +ve | 2 tests +ve** 
+```{r}
+renderValueBox({
+  p_diseasen = 1 - input$p_diseasep
+  ## 1 - sensitivity
+  p_testn_diseasep = 1 - input$p_testp_diseasep
+
+  ## 1 - specificity
+  p_testp_diseasen = 1 - input$p_testn_diseasen
+
+  # posterior
+  p_diseasep_testp = input$p_testp_diseasep*input$p_diseasep/sum(input$p_testp_diseasep*input$p_diseasep + p_testp_diseasen*p_diseasen)
+  p_diseasen_testn = input$p_testn_diseasen*p_diseasen/sum(input$p_testn_diseasen*p_diseasen + p_testn_diseasep*input$p_diseasep)
+  p_diseasep_testn = 1-p_diseasen_testn
+  
+  ## 2nd test:
+  p_diseasep2 = p_diseasep_testp
+  p_diseasen2 = 1- p_diseasep2
+  p_diseasep_testp2 = input$p_testp_diseasep*p_diseasep2/sum(input$p_testp_diseasep*p_diseasep2 + p_testp_diseasen*p_diseasen2)
+
+  valueBox(paste0(round(p_diseasep_testp*100,1),"% | ", round(p_diseasep_testp2*100,1), "%"), color = "red")
+})
+```
+
+### Probaility of **disease +ve** if: **1 test -ve | 2 tests -ve** 
+```{r}
+renderValueBox({
+  p_diseasen = 1 - input$p_diseasep
+  ## 1 - sensitivity
+  p_testn_diseasep = 1 - input$p_testp_diseasep
+
+  ## 1 - specificity
+  p_testp_diseasen = 1 - input$p_testn_diseasen
+
+  # posterior
+  p_diseasep_testp = input$p_testp_diseasep*input$p_diseasep/sum(input$p_testp_diseasep*input$p_diseasep + p_testp_diseasen*p_diseasen)
+  p_diseasen_testn = input$p_testn_diseasen*p_diseasen/sum(input$p_testn_diseasen*p_diseasen + p_testn_diseasep*input$p_diseasep)
+  p_diseasep_testn = 1-p_diseasen_testn
+  
+  ## 2nd test:
+  p_diseasep2 = p_diseasep_testn
+  p_diseasen2 = 1- p_diseasep2
+  p_diseasep_testn2 = p_testn_diseasep*p_diseasep2/sum(p_testn_diseasep*p_diseasep2 + input$p_testn_diseasen*p_diseasen2)
+
+  valueBox(paste0(round(p_diseasep_testn*100,1),"% | ", round(p_diseasep_testn2*100,1), "%"), color = "red")
+})
+```
+
+Column
+-----------------
+
+### Probaility of **disease -ve** if: **1 test -ve | 2 tests -ve** 
+```{r}
+renderValueBox({
+  p_diseasen = 1 - input$p_diseasep
+  ## 1 - sensitivity
+  p_testn_diseasep = 1 - input$p_testp_diseasep
+
+  ## 1 - specificity
+  p_testp_diseasen = 1 - input$p_testn_diseasen
+
+  # posterior
+  p_diseasep_testp = input$p_testp_diseasep*input$p_diseasep/sum(input$p_testp_diseasep*input$p_diseasep + p_testp_diseasen*p_diseasen)
+  p_diseasen_testn = input$p_testn_diseasen*p_diseasen/sum(input$p_testn_diseasen*p_diseasen + p_testn_diseasep*input$p_diseasep)
+  p_diseasep_testn = 1-p_diseasen_testn
+  
+  ## 2nd test:
+  p_diseasep2 = p_diseasep_testn
+  p_diseasen2 = 1- p_diseasep2
+  p_diseasen_testn2 = input$p_testn_diseasen*p_diseasen2/sum(input$p_testn_diseasen*p_diseasen2 + p_testn_diseasep*p_diseasep2)
+
+  valueBox(paste0(round(p_diseasen_testn*100,1),"% | ", round(p_diseasen_testn2*100,1), "%"))
+})
+```
+
+
+### Probaility of **disease -ve** if: **1 test +ve | 2 tests +ve** 
+```{r}
+renderValueBox({
+  p_diseasen = 1 - input$p_diseasep
+  ## 1 - sensitivity
+  p_testn_diseasep = 1 - input$p_testp_diseasep
+
+  ## 1 - specificity
+  p_testp_diseasen = 1 - input$p_testn_diseasen
+
+  # posterior
+  p_diseasep_testp = input$p_testp_diseasep*input$p_diseasep/sum(input$p_testp_diseasep*input$p_diseasep + p_testp_diseasen*p_diseasen)
+  p_diseasen_testn = input$p_testn_diseasen*p_diseasen/sum(input$p_testn_diseasen*p_diseasen + p_testn_diseasep*input$p_diseasep)
+  p_diseasep_testn = 1-p_diseasen_testn
+  p_diseasen_testp = 1 - p_diseasep_testp
+  
+  ## 2nd test:
+  p_diseasep2 = p_diseasep_testp
+  p_diseasen2 = 1- p_diseasep2
+  p_diseasen_testp2 = p_testp_diseasen*p_diseasen2/sum(p_testp_diseasen*p_diseasen2 + input$p_testp_diseasep*p_diseasep2)
+
+  valueBox(paste0(round(p_diseasen_testp*100,1),"% | ", round(p_diseasen_testp2*100,1), "%"))
+})
+```
